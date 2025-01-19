@@ -8,5 +8,4 @@
 
 #
 
-  VAC bypass recommended.
-  Removed nosave from vars.h and that's pretty much it
+Removed NoSave from Vars.h
