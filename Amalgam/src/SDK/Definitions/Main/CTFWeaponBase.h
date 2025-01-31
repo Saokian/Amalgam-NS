@@ -1,6 +1,6 @@
 #pragma once
 #include "CBaseCombatWeapon.h"
-#include "CBasePlayer.h"
+#include "CTFPlayer.h"
 #include "CBaseProjectile.h"
 
 MAKE_SIGNATURE(CTFWeaponBase_GetSpreadAngles, "client.dll", "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC ? 0F 29 74 24 ? 48 8B DA 48 8B F9 E8 ? ? ? ? 48 8B C8", 0x0);
@@ -9,6 +9,7 @@ MAKE_SIGNATURE(CTFWeaponBaseMelee_CalcIsAttackCriticalHelper, "client.dll", "40 
 MAKE_SIGNATURE(CTFWeaponBase_CalcIsAttackCriticalHelper, "client.dll", "48 89 5C 24 ? 55 56 57 48 81 EC ? ? ? ? 0F 29 74 24", 0x0);
 MAKE_SIGNATURE(CTFWeaponBase_GetAppropriateWorldOrViewModel, "client.dll", "48 89 5C 24 ? 57 48 83 EC ? 48 8B D9 E8 ? ? ? ? 48 8B C8 C7 44 24 ? ? ? ? ? 4C 8D 0D ? ? ? ? 33 D2 4C 8D 05 ? ? ? ? E8 ? ? ? ? 48 8B F8 48 85 C0 74 ? 48 8B CB", 0x0);
 MAKE_SIGNATURE(CTFWeaponBaseGun_GetWeaponSpread, "client.dll", "48 89 5C 24 ? 57 48 83 EC ? 4C 63 91", 0x0);
+MAKE_SIGNATURE(CTFWeaponBase_IncrementAmmo, "client.dll", "48 89 5C 24 ? 56 48 83 EC ? 48 8B D9 E8 ? ? ? ? 48 8B C8", 0x0);
 
 //credits: KGB (all weapon info stuff below)
 typedef unsigned short WEAPON_FILE_INFO_HANDLE;
@@ -221,7 +222,7 @@ public:
 
 	inline bool CanFireCriticalShot(bool bIsHeadshot = false)
 	{
-		auto pOwner = m_hOwnerEntity().Get()->As<CBasePlayer>();
+		auto pOwner = m_hOwnerEntity().Get()->As<CTFPlayer>();
 		if (!pOwner)
 			return false;
 
@@ -234,7 +235,7 @@ public:
 
 	inline bool CanPrimaryAttack()
 	{
-		auto pOwner = m_hOwnerEntity().Get()->As<CBasePlayer>();
+		auto pOwner = m_hOwnerEntity().Get()->As<CTFPlayer>();
 		if (!pOwner)
 			return false;
 
@@ -244,7 +245,7 @@ public:
 
 	inline bool CanSecondaryAttack()
 	{
-		auto pOwner = m_hOwnerEntity().Get()->As<CBasePlayer>();
+		auto pOwner = m_hOwnerEntity().Get()->As<CTFPlayer>();
 		if (!pOwner)
 			return false;
 
@@ -263,7 +264,7 @@ public:
 		{
 			if (auto pOwner = m_hOwnerEntity().Get())
 			{
-				int nAmmoCount = pOwner->As<CBasePlayer>()->GetAmmoCount(m_iPrimaryAmmoType());
+				int nAmmoCount = pOwner->As<CTFPlayer>()->GetAmmoCount(m_iPrimaryAmmoType());
 				return nAmmoCount > (m_iItemDefinitionIndex() == Engi_m_TheWidowmaker ? 29 : 0);
 			}
 		}
@@ -336,7 +337,8 @@ public:
 
 	inline bool AmbassadorCanHeadshot()
 	{
-		if ((m_iItemDefinitionIndex() == Spy_m_TheAmbassador || m_iItemDefinitionIndex() == Spy_m_FestiveAmbassador) && I::GlobalVars->curtime - m_flLastFireTime() <= 1.f)
+		if (GetClassID() == ETFClassID::CTFRevolver && SDK::AttribHookValue(0, "set_weapon_mode", this) == 1
+			&& I::GlobalVars->curtime - m_flLastFireTime() <= 1.f)
 			return false;
 		return true;
 	}
@@ -388,6 +390,11 @@ public:
 		return S::CTFWeaponBaseGun_GetWeaponSpread.Call<float>(this);
 	}
 
+	inline void IncrementAmmo()
+	{
+		return S::CTFWeaponBase_IncrementAmmo.Call<void>(this);
+	}
+
 	CHudTexture* GetWeaponIcon();
 };
 
@@ -421,16 +428,12 @@ public:
 
 	inline int GetMedigunType()
 	{
-		int iMode = 0;
-		iMode = static_cast<int>(SDK::AttribHookValue(static_cast<float>(iMode), "set_weapon_mode", this));
-		return iMode;
+		return SDK::AttribHookValue(0, "set_weapon_mode", this);
 	}
 
 	inline MedigunChargeTypes GetChargeType()
 	{
-		int iTmp = MEDIGUN_CHARGE_INVULN;
-		iTmp = static_cast<int>(SDK::AttribHookValue(static_cast<float>(iTmp), "set_charge_type", this));
-
+		int iTmp = SDK::AttribHookValue(MEDIGUN_CHARGE_INVULN, "set_charge_type", this);
 		if (GetMedigunType() == MEDIGUN_RESIST)
 			iTmp += m_nChargeResistType();
 
@@ -458,6 +461,62 @@ class CTFSniperRifle : public CTFWeaponBase
 {
 public:
 	NETVAR(m_flChargedDamage, float, "CTFSniperRifle", "m_flChargedDamage");
+
+	inline int GetRifleType()
+	{
+		return SDK::AttribHookValue(0, "set_weapon_mode", this);
+	}
+
+	inline float GetHeadshotMult(CTFPlayer* pTarget = nullptr)
+	{
+		auto GetMainMult = [&]()
+			{
+				auto pOwner = m_hOwnerEntity().Get()->As<CTFPlayer>();
+				if (pOwner && pOwner->IsCritBoosted())
+					return 3.f;
+
+				if (GetRifleType() == RIFLE_JARATE)
+				{
+					if (SDK::AttribHookValue(0, "jarate_duration", this) > 0)
+						return 1.36f;
+
+					if (pOwner && pOwner->IsMiniCritBoosted()
+						|| pTarget && (pTarget->InCond(TF_COND_URINE) || pTarget->InCond(TF_COND_MARKEDFORDEATH)))
+						return 1.36f;
+
+					return 1.f;
+				}
+
+				return 3.f;
+			};
+		
+		float flMult = SDK::AttribHookValue(GetMainMult(), "mult_dmg", this);
+		if (m_flChargedDamage() == 150.f)
+			flMult = SDK::AttribHookValue(flMult, "sniper_full_charge_damage_bonus", this);
+		return flMult;
+	}
+
+	inline float GetBodyshotMult(CTFPlayer* pTarget = nullptr)
+	{
+		auto GetMainMult = [&]()
+			{
+				auto pOwner = m_hOwnerEntity().Get()->As<CTFPlayer>();
+				if (pOwner && pOwner->IsCritBoosted())
+					return 3.f;
+
+				if (pOwner && pOwner->IsMiniCritBoosted()
+					|| pTarget && (pTarget->InCond(TF_COND_URINE) || pTarget->InCond(TF_COND_MARKEDFORDEATH)))
+					return 1.36f;
+
+				return 1.f;
+			};
+
+		float flMult = SDK::AttribHookValue(GetMainMult(), "mult_dmg", this);
+		flMult = SDK::AttribHookValue(flMult, "bodyshot_damage_modify", this);
+		if (m_flChargedDamage() == 150.f)
+			flMult = SDK::AttribHookValue(flMult, "sniper_full_charge_damage_bonus", this);
+		return flMult;
+	}
 };
 
 class CTFGrenadeLauncher : public CTFWeaponBase

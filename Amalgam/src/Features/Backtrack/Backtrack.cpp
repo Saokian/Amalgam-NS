@@ -42,6 +42,17 @@ float CBacktrack::GetReal(int iFlow, bool bNoFake)
 	return pNetChan->GetLatency(FLOW_INCOMING) + pNetChan->GetLatency(FLOW_OUTGOING) - (bNoFake ? m_flFakeLatency : 0.f);
 }
 
+// Returns the current anticipated choke
+int CBacktrack::GetAnticipatedChoke(int iMethod)
+{
+	int iAnticipatedChoke = 0;
+	if (F::Ticks.CanChoke() && G::PrimaryWeaponType != EWeaponType::HITSCAN && Vars::Aimbot::General::AimType.Value == Vars::Aimbot::General::AimTypeEnum::Silent)
+		iAnticipatedChoke = 1;
+	if (F::FakeLag.m_iGoal && !Vars::CL_Move::Fakelag::UnchokeOnAttack.Value && F::Ticks.m_iShiftedTicks == F::Ticks.m_iShiftedGoal && !F::Ticks.m_bDoubletap && !F::Ticks.m_bSpeedhack)
+		iAnticipatedChoke = F::FakeLag.m_iGoal - I::ClientState->chokedcommands; // iffy, unsure if there is a good way to get it to work well without unchoking
+	return iAnticipatedChoke;
+}
+
 void CBacktrack::SendLerp()
 {
 	auto pNetChan = reinterpret_cast<CNetChannel*>(I::EngineClient->GetNetChannelInfo());
@@ -92,20 +103,6 @@ void CBacktrack::UpdateDatagram()
 
 
 
-bool CBacktrack::WithinRewind(const TickRecord& record)
-{
-	auto pNetChan = I::EngineClient->GetNetChannelInfo();
-	if (!pNetChan)
-		return false;
-
-	const float flCorrect = std::clamp(pNetChan->GetLatency(FLOW_OUTGOING) + ROUND_TO_TICKS(m_flFakeInterp) + ROUND_TO_TICKS(m_flFakeLatency), 0.f, m_flMaxUnlag) - pNetChan->GetLatency(FLOW_OUTGOING);
-	const int iServerTick = m_iTickCount + G::AnticipatedChoke + Vars::Backtrack::Offset.Value;
-
-	const float flDelta = flCorrect - TICKS_TO_TIME(iServerTick - TIME_TO_TICKS(record.m_flSimTime));
-
-	return fabsf(flDelta) < float(Vars::Backtrack::Window.Value) / 1000;
-}
-
 std::deque<TickRecord>* CBacktrack::GetRecords(CBaseEntity* pEntity)
 {
 	if (m_mRecords[pEntity].empty())
@@ -116,22 +113,43 @@ std::deque<TickRecord>* CBacktrack::GetRecords(CBaseEntity* pEntity)
 
 std::deque<TickRecord> CBacktrack::GetValidRecords(std::deque<TickRecord>* pRecords, CTFPlayer* pLocal, bool bDistance)
 {
-	std::deque<TickRecord> validRecords = {};
-	if (!pRecords)
-		return validRecords;
+	std::deque<TickRecord> vRecords = {};
+	if (!pRecords || pRecords->empty())
+		return vRecords;
 
-	for (auto& pTick : *pRecords)
+	auto pNetChan = I::EngineClient->GetNetChannelInfo();
+	if (!pNetChan)
+		return vRecords;
+
+	float flCorrect = std::clamp(pNetChan->GetLatency(FLOW_OUTGOING) + pNetChan->GetLatency(FLOW_INCOMING) + ROUND_TO_TICKS(m_flFakeInterp), 0.f, m_flMaxUnlag);
+	int iServerTick = m_iTickCount + GetAnticipatedChoke() + Vars::Backtrack::Offset.Value + TIME_TO_TICKS(pNetChan->GetLatency(FLOW_OUTGOING));
+
+	for (auto& tRecord : *pRecords)
 	{
-		if (!WithinRewind(pTick))
+		float flDelta = fabsf(flCorrect - TICKS_TO_TIME(iServerTick - TIME_TO_TICKS(tRecord.m_flSimTime)));
+		if (flDelta > float(Vars::Backtrack::Window.Value) / 1000)
 			continue;
 
-		validRecords.push_back(pTick);
+		vRecords.push_back(tRecord);
 	}
 
-	if (pLocal)
+	if (vRecords.empty())
+	{	// make sure there is at least 1 record
+		float flMinDelta = 0.2f;
+		for (auto& tRecord : *pRecords)
+		{
+			float flDelta = fabsf(flCorrect - TICKS_TO_TIME(iServerTick - TIME_TO_TICKS(tRecord.m_flSimTime)));
+			if (flDelta > flMinDelta)
+				continue;
+
+			flMinDelta = flDelta;
+			vRecords = { tRecord };
+		}
+	}
+	else if (pLocal && vRecords.size() > 1)
 	{
 		if (bDistance)
-			std::sort(validRecords.begin(), validRecords.end(), [&](const TickRecord& a, const TickRecord& b) -> bool
+			std::sort(vRecords.begin(), vRecords.end(), [&](const TickRecord& a, const TickRecord& b) -> bool
 				{
 					if (Vars::Backtrack::PreferOnShot.Value && a.m_bOnShot != b.m_bOnShot)
 						return a.m_bOnShot > b.m_bOnShot;
@@ -140,14 +158,7 @@ std::deque<TickRecord> CBacktrack::GetValidRecords(std::deque<TickRecord>* pReco
 				});
 		else
 		{
-			auto pNetChan = I::EngineClient->GetNetChannelInfo();
-			if (!pNetChan)
-				return validRecords;
-
-			const float flCorrect = std::clamp(pNetChan->GetLatency(FLOW_OUTGOING) + ROUND_TO_TICKS(m_flFakeInterp) + ROUND_TO_TICKS(m_flFakeLatency), 0.f, m_flMaxUnlag) - pNetChan->GetLatency(FLOW_OUTGOING);
-			const int iServerTick = m_iTickCount + G::AnticipatedChoke + Vars::Backtrack::Offset.Value;
-
-			std::sort(validRecords.begin(), validRecords.end(), [&](const TickRecord& a, const TickRecord& b) -> bool
+			std::sort(vRecords.begin(), vRecords.end(), [&](const TickRecord& a, const TickRecord& b) -> bool
 				{
 					if (Vars::Backtrack::PreferOnShot.Value && a.m_bOnShot != b.m_bOnShot)
 						return a.m_bOnShot > b.m_bOnShot;
@@ -159,7 +170,7 @@ std::deque<TickRecord> CBacktrack::GetValidRecords(std::deque<TickRecord>* pReco
 		}
 	}
 
-	return validRecords;
+	return vRecords;
 }
 
 
@@ -177,6 +188,8 @@ void CBacktrack::MakeRecords()
 			pPlayer->m_flSimulationTime(),
 			*reinterpret_cast<BoneMatrix*>(H::Entities.GetBones(pPlayer->entindex())),
 			pPlayer->m_vecOrigin(),
+			pPlayer->m_vecMins(),
+			pPlayer->m_vecMaxs(),
 			m_mDidShoot[pPlayer->entindex()]
 		};
 
@@ -261,13 +274,6 @@ void CBacktrack::FrameStageNotify()
 void CBacktrack::Run(CUserCmd* pCmd)
 {
 	SendLerp();
-
-	// might not even be necessary
-	G::AnticipatedChoke = 0;
-	if (F::Ticks.m_iShiftedTicks != F::Ticks.m_iMaxShift && G::PrimaryWeaponType != EWeaponType::HITSCAN && Vars::Aimbot::General::AimType.Value == Vars::Aimbot::General::AimTypeEnum::Silent)
-		G::AnticipatedChoke = 1;
-	if (F::FakeLag.m_iGoal && !Vars::CL_Move::Fakelag::UnchokeOnAttack.Value && F::Ticks.m_iShiftedTicks == F::Ticks.m_iShiftedGoal && !F::Ticks.m_bDoubletap && !F::Ticks.m_bSpeedhack)
-		G::AnticipatedChoke = F::FakeLag.m_iGoal - I::ClientState->chokedcommands; // iffy, unsure if there is a good way to get it to work well without unchoking
 }
 
 void CBacktrack::ResolverUpdate(CBaseEntity* pEntity)

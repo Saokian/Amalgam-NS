@@ -1,5 +1,6 @@
 #include "Events.h"
 
+#include "../../Core/Core.h"
 #include "../../Features/Backtrack/Backtrack.h"
 #include "../../Features/CheaterDetection/CheaterDetection.h"
 #include "../../Features/CritHack/CritHack.h"
@@ -21,7 +22,7 @@ bool CEventListener::Initialize()
 
 		if (!I::GameEventManager->FindListener(this, szEvent))
 		{
-			SDK::Output("Amalgam", std::format("Failed to add listener: {}", szEvent).c_str(), { 255, 150, 175, 255 });
+			U::Core.AppendFailText(std::format("Failed to add listener: {}", szEvent).c_str());
 			m_bFailed = true;
 		}
 	}
@@ -43,7 +44,7 @@ void CEventListener::FireGameEvent(IGameEvent* pEvent)
 	auto uHash = FNV1A::Hash32(pEvent->GetName());
 
 	F::Records.Event(pEvent, uHash, pLocal);
-	if (I::EngineClient->IsPlayingTimeDemo())
+	if (I::EngineClient->IsPlayingDemo())
 		return;
 
 	F::CritHack.Event(pEvent, uHash, pLocal);
